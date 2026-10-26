@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Invento",
+    "output": "docs/architecture/inventory-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "Staff",
+      "sublabel": "Admin / Manager / Warehouse",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "spa",
+      "type": "frontend",
+      "label": "React SPA",
+      "sublabel": "Vite + TanStack Query",
+      "pos": [
+        280,
+        260
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "Node gateway",
+      "sublabel": "sessions, email codes, uploads",
+      "pos": [
+        560,
+        260
+      ],
+      "size": [
+        190,
+        64
+      ],
+      "tag": ":4000"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI /api/v1",
+      "sublabel": "private, system of record",
+      "pos": [
+        880,
+        260
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": ":8000"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "users, stock, requests",
+      "pos": [
+        1180,
+        260
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis",
+      "sublabel": "sessions, codes, limits, cache",
+      "pos": [
+        715,
+        90
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "smtp",
+      "type": "external",
+      "label": "Email (Gmail SMTP)",
+      "sublabel": "codes + notifications",
+      "pos": [
+        440,
+        440
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "files",
+      "type": "cloud",
+      "label": "Avatar storage",
+      "sublabel": "local disk or S3",
+      "pos": [
+        720,
+        440
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Browser",
+      "wraps": [
+        "spa"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "user-to-spa",
+      "from": "user",
+      "to": "spa",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "spa-to-gateway",
+      "from": "spa",
+      "to": "gateway",
+      "label": "cookie + CSRF",
+      "variant": "emphasis"
+    },
+    {
+      "id": "gateway-to-api",
+      "from": "gateway",
+      "to": "api",
+      "label": "service token",
+      "variant": "security"
+    },
+    {
+      "id": "api-to-db",
+      "from": "api",
+      "to": "db",
+      "label": "async SQL"
+    },
+    {
+      "id": "gateway-to-redis",
+      "from": "gateway",
+      "to": "redis",
+      "label": "sessions",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "api-to-redis",
+      "from": "api",
+      "to": "redis",
+      "label": "cache",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "gateway-to-smtp",
+      "from": "gateway",
+      "to": "smtp",
+      "label": "emails",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "gateway-to-files",
+      "from": "gateway",
+      "to": "files",
+      "label": "avatars",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Gateway",
+      "items": [
+        "The only service the browser talks to",
+        "HTTP-only session cookie; no token in the page",
+        "Rate limits, CSRF, email codes, uploads",
+        "Runs without Redis in development"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "API",
+      "items": [
+        "Owns users, profiles, access requests, stock",
+        "Trusts only the gateway's short-lived tokens",
+        "Enforces roles on every call"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Sign-in",
+      "items": [
+        "Password, or a 6-digit code by email",
+        "Forgot password resets by code",
+        "Sign-up: email code, then admin approval"
+      ]
+    }
+  ]
+}
