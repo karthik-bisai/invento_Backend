@@ -19,20 +19,23 @@ async def get_for_user(db: AsyncSession, user_id: uuid.UUID) -> AccessRequest | 
 
 
 async def list_requests(
-    db: AsyncSession, page: int, size: int, status: RequestStatus | None = None
+    db: AsyncSession, page: int, size: int, status: RequestStatus | None = None, organization_id: uuid.UUID | None = None
 ) -> tuple[list[AccessRequest], int]:
     stmt = select(AccessRequest).order_by(AccessRequest.created_at.desc(), AccessRequest.id)
+    if organization_id:
+        stmt = stmt.where(AccessRequest.organization_id == organization_id)
     if status:
         stmt = stmt.where(AccessRequest.status == status)
     return await paginate(db, stmt, page, size)
 
 
-async def open_for(db: AsyncSession, user: User) -> AccessRequest:
+async def open_for(db: AsyncSession, user: User, organization_id: uuid.UUID | None = None) -> AccessRequest:
     """The user's request, creating a pending one if none exists. Not committed."""
     existing = await get_for_user(db, user.id)
     if existing:
         return existing
-    request = AccessRequest(user_id=user.id, status=RequestStatus.PENDING)
+    org_id = organization_id or user.organization_id
+    request = AccessRequest(user_id=user.id, organization_id=org_id, status=RequestStatus.PENDING)
     db.add(request)
     await db.flush()
     await db.refresh(request, attribute_names=["user"])

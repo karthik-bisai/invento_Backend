@@ -16,6 +16,22 @@ async def get(db: AsyncSession, item_id: uuid.UUID, for_update: bool = False) ->
     return await db.get(InventoryItem, item_id, with_for_update=for_update)
 
 
+async def get_with_org(
+    db: AsyncSession,
+    item_id: uuid.UUID,
+    organization_id: uuid.UUID | None = None,
+    for_update: bool = False,
+) -> InventoryItem | None:
+    item = await db.get(InventoryItem, item_id, with_for_update=for_update)
+    if item is None:
+        return None
+    if organization_id is not None:
+        prod = await db.get(Product, item.product_id)
+        if prod is None or (prod.organization_id is not None and prod.organization_id != organization_id):
+            return None
+    return item
+
+
 SORT_COLUMNS = {
     "sku": Product.sku,
     "name": Product.name,
@@ -36,6 +52,7 @@ async def list_items(
     low_stock: bool = False,
     sort_by: str = "name",
     order: str = "asc",
+    organization_id: uuid.UUID | None = None,
 ) -> tuple[list[Row[Any]], int]:
     """Inventory rows joined with product/warehouse names and the product's total across warehouses."""
     totals = (
@@ -62,6 +79,8 @@ async def list_items(
         .join(Warehouse, Warehouse.id == InventoryItem.warehouse_id)
         .join(totals, totals.c.pid == InventoryItem.product_id)
     )
+    if organization_id:
+        stmt = stmt.where(Product.organization_id == organization_id)
     if product_id:
         stmt = stmt.where(InventoryItem.product_id == product_id)
     if warehouse_id:

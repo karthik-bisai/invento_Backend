@@ -24,13 +24,14 @@ async def _pending_or_error(db: AsyncSession, request_id: uuid.UUID) -> AccessRe
     return request
 
 
-@router.get("", response_model=Page[AccessRequestResponse], dependencies=[ADMIN_ONLY])
+@router.get("", response_model=Page[AccessRequestResponse])
 async def list_requests(
     params: PageParams = Depends(),
     request_status: RequestStatus | None = Query(None, alias="status"),
+    admin: User = Depends(require_roles([Role.ADMIN])),
     db: AsyncSession = Depends(get_db),
 ) -> Page[AccessRequestResponse]:
-    items, total = await crud.list_requests(db, params.page, params.size, request_status)
+    items, total = await crud.list_requests(db, params.page, params.size, request_status, organization_id=admin.organization_id)
     return Page(items=items, total=total, page=params.page, size=params.size)
 
 
@@ -42,6 +43,8 @@ async def approve(
     admin: User = Depends(require_roles([Role.ADMIN])),
 ) -> AccessRequest:
     request = await _pending_or_error(db, request_id)
+    if admin.organization_id is not None and request.organization_id is not None and request.organization_id != admin.organization_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Access request belongs to another organization")
     return await crud.approve(db, request, admin, (data or ApproveRequest()).role)
 
 
@@ -53,4 +56,6 @@ async def reject(
     admin: User = Depends(require_roles([Role.ADMIN])),
 ) -> AccessRequest:
     request = await _pending_or_error(db, request_id)
+    if admin.organization_id is not None and request.organization_id is not None and request.organization_id != admin.organization_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Access request belongs to another organization")
     return await crud.reject(db, request, admin, (data or RejectRequest()).note)

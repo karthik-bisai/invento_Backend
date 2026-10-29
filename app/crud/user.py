@@ -13,16 +13,23 @@ async def get(db: AsyncSession, user_id: uuid.UUID) -> User | None:
     return await db.get(User, user_id)
 
 
-async def list_users(db: AsyncSession, page: int, size: int, q: str | None = None) -> tuple[list[User], int]:
+async def list_users(
+    db: AsyncSession, page: int, size: int, q: str | None = None, organization_id: uuid.UUID | None = None
+) -> tuple[list[User], int]:
     stmt = select(User).order_by(User.email, User.id)
+    if organization_id:
+        stmt = stmt.where(User.organization_id == organization_id)
     if q:
         like = f"%{q}%"
         stmt = stmt.where(User.email.ilike(like) | User.full_name.ilike(like))
     return await paginate(db, stmt, page, size)
 
 
-async def list_admins(db: AsyncSession) -> list[User]:
-    return list(await db.scalars(select(User).where(User.role == Role.ADMIN, User.is_active.is_(True)).order_by(User.email)))
+async def list_admins(db: AsyncSession, organization_id: uuid.UUID | None = None) -> list[User]:
+    stmt = select(User).where(User.role == Role.ADMIN, User.is_active.is_(True)).order_by(User.email)
+    if organization_id:
+        stmt = stmt.where(User.organization_id == organization_id)
+    return list(await db.scalars(stmt))
 
 
 async def update(db: AsyncSession, user: User, data: UserUpdate) -> User:
@@ -37,7 +44,11 @@ async def update(db: AsyncSession, user: User, data: UserUpdate) -> User:
 
 
 async def update_profile(db: AsyncSession, user: User, data: ProfileUpdate) -> User:
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    if str(user.role.value if isinstance(user.role, Role) else user.role).upper() != "ADMIN":
+        changes.pop("job_title", None)
+        changes.pop("department", None)
+    for field, value in changes.items():
         setattr(user, field, value)
     await save(db, user)
     return user
@@ -75,12 +86,24 @@ async def get_by_email(db: AsyncSession, email: str) -> User | None:
     return await db.scalar(select(User).where(User.email == email.lower()))
 
 
-async def create(db: AsyncSession, data: UserCreate | UserRegister, *, is_active: bool = True, email_verified: bool = True) -> User:
+async def create(
+    db: AsyncSession,
+    data: UserCreate | UserRegister,
+    *,
+    is_active: bool = True,
+    email_verified: bool = True,
+    organization_id: uuid.UUID | None = None,
+    role: Role | None = None,
+) -> User:
+    assigned_role = role or getattr(data, "role", Role.WAREHOUSE_STAFF)
     user = User(
         email=data.email.lower(),
         hashed_password=hash_password(data.password),
-        role=getattr(data, "role", Role.WAREHOUSE_STAFF),
+        role=assigned_role,
         full_name=data.full_name,
+        job_title=getattr(data, "job_title", None),
+        department=getattr(data, "department", None),
+        organization_id=organization_id,
         is_active=is_active,
         email_verified=email_verified,
     )

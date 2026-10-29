@@ -1,4 +1,5 @@
 import logging
+import uuid
 from decimal import Decimal
 
 from redis.asyncio import Redis
@@ -17,22 +18,32 @@ SUMMARY_CACHE_KEY = "inventory:summary"
 SUMMARY_TTL_SECONDS = 60
 
 
-def _low_stock_query():
+def _low_stock_query(organization_id: uuid.UUID | None = None):
     """Products whose total on-hand across warehouses is at/below a (non-zero) reorder level."""
     qty = func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0).label("qty")
-    return (
+    stmt = (
         select(Product.id, Product.sku, Product.name, Product.reorder_level, qty)
         .select_from(Product)
         .outerjoin(InventoryItem, InventoryItem.product_id == Product.id)
         .where(Product.reorder_level > 0)
-        .group_by(Product.id, Product.sku, Product.name, Product.reorder_level)
+    )
+    if organization_id is not None:
+        stmt = stmt.where(Product.organization_id == organization_id)
+    return (
+        stmt.group_by(Product.id, Product.sku, Product.name, Product.reorder_level)
         .having(func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0) <= Product.reorder_level)
     )
 
 
-async def list_low_stock(db: AsyncSession, limit: int = 20) -> list[LowStockItem]:
+async def list_low_stock(db: AsyncSession, limit: int = 20, organization_id: uuid.UUID | None = None) -> list[LowStockItem]:
     """Most depleted products first (lowest stock relative to reorder level)."""
-    rows = (await db.execute(_low_stock_query().order_by(text("qty * 1.0 / reorder_level"), Product.name).limit(limit))).all()
+    sub = _low_stock_query(organization_id).subquery()
+    stmt = (
+        select(sub.c.id, sub.c.sku, sub.c.name, sub.c.reorder_level, sub.c.qty)
+        .order_by((sub.c.qty * 1.0 / sub.c.reorder_level), sub.c.name)
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
     return [
         LowStockItem(
             product_id=r.id,
@@ -46,36 +57,50 @@ async def list_low_stock(db: AsyncSession, limit: int = 20) -> list[LowStockItem
     ]
 
 
-async def compute_inventory_summary(db: AsyncSession) -> InventorySummary:
-    total_products = await db.scalar(select(func.count(Product.id))) or 0
-    total_warehouses = await db.scalar(select(func.count(Warehouse.id))) or 0
+async def compute_inventory_summary(db: AsyncSession, organization_id: uuid.UUID | None = None) -> InventorySummary:
+    prod_stmt = select(func.count(Product.id))
+    wh_count_stmt = select(func.count(Warehouse.id))
+    if organization_id is not None:
+        prod_stmt = prod_stmt.where(Product.organization_id == organization_id)
+        wh_count_stmt = wh_count_stmt.where(Warehouse.organization_id == organization_id)
+
+    total_products = await db.scalar(prod_stmt) or 0
+    total_warehouses = await db.scalar(wh_count_stmt) or 0
 
     on_hand = func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0)
     reserved = func.coalesce(func.sum(InventoryItem.reserved_quantity), 0)
     value = func.coalesce(func.sum(InventoryItem.quantity_on_hand * Product.unit_price), 0)
 
-    totals = (
-        await db.execute(
-            select(on_hand, reserved, value).select_from(InventoryItem).join(Product, Product.id == InventoryItem.product_id)
-        )
-    ).one()
+    totals_stmt = (
+        select(on_hand, reserved, value)
+        .select_from(InventoryItem)
+        .join(Product, Product.id == InventoryItem.product_id)
+    )
+    if organization_id is not None:
+        totals_stmt = totals_stmt.where(Product.organization_id == organization_id)
 
-    low_stock = await db.scalar(select(func.count()).select_from(_low_stock_query().subquery())) or 0
+    totals = (await db.execute(totals_stmt)).one()
+
+    low_stock = await db.scalar(select(func.count()).select_from(_low_stock_query(organization_id).subquery())) or 0
+
+    wh_query = (
+        select(
+            Warehouse.id,
+            Warehouse.name,
+            func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0),
+            func.coalesce(func.sum(InventoryItem.reserved_quantity), 0),
+            func.coalesce(func.sum(InventoryItem.quantity_on_hand * Product.unit_price), 0),
+        )
+        .select_from(Warehouse)
+        .outerjoin(InventoryItem, InventoryItem.warehouse_id == Warehouse.id)
+        .outerjoin(Product, Product.id == InventoryItem.product_id)
+    )
+    if organization_id is not None:
+        wh_query = wh_query.where(Warehouse.organization_id == organization_id)
 
     wh_rows = (
         await db.execute(
-            select(
-                Warehouse.id,
-                Warehouse.name,
-                func.coalesce(func.sum(InventoryItem.quantity_on_hand), 0),
-                func.coalesce(func.sum(InventoryItem.reserved_quantity), 0),
-                func.coalesce(func.sum(InventoryItem.quantity_on_hand * Product.unit_price), 0),
-            )
-            .select_from(Warehouse)
-            .outerjoin(InventoryItem, InventoryItem.warehouse_id == Warehouse.id)
-            .outerjoin(Product, Product.id == InventoryItem.product_id)
-            .group_by(Warehouse.id, Warehouse.name)
-            .order_by(Warehouse.name)
+            wh_query.group_by(Warehouse.id, Warehouse.name).order_by(Warehouse.name)
         )
     ).all()
 
@@ -100,27 +125,37 @@ async def compute_inventory_summary(db: AsyncSession) -> InventorySummary:
     )
 
 
-async def get_inventory_summary(db: AsyncSession, redis: Redis) -> InventorySummary:
+def _cache_key(organization_id: uuid.UUID | None = None) -> str:
+    return f"{SUMMARY_CACHE_KEY}:{organization_id}" if organization_id else SUMMARY_CACHE_KEY
+
+
+async def get_inventory_summary(
+    db: AsyncSession, redis: Redis, organization_id: uuid.UUID | None = None
+) -> InventorySummary:
     """Return the aggregate summary, served from Redis for up to 60s. Falls back to the DB if Redis is down."""
+    cache_key = _cache_key(organization_id)
     try:
-        cached = await redis.get(SUMMARY_CACHE_KEY)
+        cached = await redis.get(cache_key)
         if cached:
             return InventorySummary.model_validate_json(cached)
     except RedisError:
-        logger.warning("Redis read failed for %s", SUMMARY_CACHE_KEY, exc_info=True)
+        logger.warning("Redis read failed for %s", cache_key, exc_info=True)
 
-    summary = await compute_inventory_summary(db)
+    summary = await compute_inventory_summary(db, organization_id=organization_id)
 
     try:
-        await redis.set(SUMMARY_CACHE_KEY, summary.model_dump_json(), ex=SUMMARY_TTL_SECONDS)
+        await redis.set(cache_key, summary.model_dump_json(), ex=SUMMARY_TTL_SECONDS)
     except RedisError:
-        logger.warning("Redis write failed for %s", SUMMARY_CACHE_KEY, exc_info=True)
+        logger.warning("Redis write failed for %s", cache_key, exc_info=True)
     return summary
 
 
-async def invalidate_inventory_summary(redis: Redis) -> None:
+async def invalidate_inventory_summary(redis: Redis, organization_id: uuid.UUID | None = None) -> None:
     """Drop the cached summary. Call after any committed change that affects it."""
     try:
+        if organization_id:
+            await redis.delete(_cache_key(organization_id))
         await redis.delete(SUMMARY_CACHE_KEY)
     except RedisError:
-        logger.warning("Redis delete failed for %s; summary may be stale up to %ss", SUMMARY_CACHE_KEY, SUMMARY_TTL_SECONDS, exc_info=True)
+        logger.warning("Redis delete failed for summary; summary may be stale up to %ss", SUMMARY_TTL_SECONDS, exc_info=True)
+

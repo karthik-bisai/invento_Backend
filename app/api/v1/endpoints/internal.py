@@ -36,7 +36,8 @@ async def service_token(user_id: uuid.UUID, db: AsyncSession = Depends(get_db)) 
     user = await crud_user.get(db, user_id)
     if user is None or not user.is_active or not user.email_verified:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No active user")
-    return Token(access_token=create_access_token(str(user.id), user.role.value, SERVICE_TOKEN_TTL))
+    user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+    return Token(access_token=create_access_token(str(user.id), user_role, SERVICE_TOKEN_TTL))
 
 
 @router.post("/login/lookup", response_model=LoginLookup)
@@ -83,10 +84,12 @@ async def signup_verified(data: EmailBody, db: AsyncSession = Depends(get_db)) -
         await db.commit()
         return VerifiedResult(user=brief, auto_approved=True, admins=[])
 
-    request = await crud_access.open_for(db, user)
-    admins = await crud_user.list_admins(db)
+    request = await crud_access.open_for(db, user, organization_id=user.organization_id)
+    admins = await crud_user.list_admins(db, organization_id=user.organization_id)
     who = user.full_name or user.email
-    crud_notification.add_for_all(db, admins, "access_requested", "New access request", f"{who} is asking for access.", "/users?tab=requests")
+    crud_notification.add_for_all(
+        db, admins, "access_requested", "New access request", f"{who} is asking for access.", "/users?tab=requests", organization_id=user.organization_id
+    )
     await db.commit()
     return VerifiedResult(
         user=brief,

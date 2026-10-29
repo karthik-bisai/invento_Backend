@@ -34,19 +34,25 @@ def _check_quantities(on_hand: int, reserved: int) -> None:
 
 
 # NOTE: declared before "/{item_id}" so "summary" isn't parsed as a UUID.
-@router.get("/summary", response_model=InventorySummary, dependencies=[Depends(get_current_user)])
+@router.get("/summary", response_model=InventorySummary)
 async def inventory_summary(
-    db: AsyncSession = Depends(get_db), redis: Redis = Depends(get_redis)
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
 ) -> InventorySummary:
-    return await get_inventory_summary(db, redis)
+    return await get_inventory_summary(db, redis, organization_id=user.organization_id)
 
 
-@router.get("/low-stock", response_model=list[LowStockItem], dependencies=[Depends(get_current_user)])
-async def low_stock(limit: int = Query(20, ge=1, le=100), db: AsyncSession = Depends(get_db)) -> list[LowStockItem]:
-    return await list_low_stock(db, limit)
+@router.get("/low-stock", response_model=list[LowStockItem])
+async def low_stock(
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[LowStockItem]:
+    return await list_low_stock(db, limit, organization_id=user.organization_id)
 
 
-@router.get("", response_model=Page[InventoryRow], dependencies=[Depends(get_current_user)])
+@router.get("", response_model=Page[InventoryRow])
 async def list_inventory(
     params: PageParams = Depends(),
     product_id: uuid.UUID | None = Query(None),
@@ -55,17 +61,22 @@ async def list_inventory(
     low_stock: bool = Query(False, description="Only products at/below their reorder level"),
     sort_by: Literal["sku", "name", "warehouse", "quantity_on_hand", "reserved_quantity", "available_quantity"] = "name",
     order: Literal["asc", "desc"] = "asc",
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Page[InventoryRow]:
     rows, total = await crud.list_items(
-        db, params.page, params.size, product_id, warehouse_id, q, low_stock, sort_by, order
+        db, params.page, params.size, product_id, warehouse_id, q, low_stock, sort_by, order, organization_id=user.organization_id
     )
     return Page(items=[InventoryRow.model_validate(r, from_attributes=True) for r in rows], total=total, page=params.page, size=params.size)
 
 
-@router.get("/{item_id}", response_model=InventoryItemResponse, dependencies=[Depends(get_current_user)])
-async def get_item(item_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> InventoryItem:
-    item = await crud.get(db, item_id)
+@router.get("/{item_id}", response_model=InventoryItemResponse)
+async def get_item(
+    item_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> InventoryItem:
+    item = await crud.get_with_org(db, item_id, organization_id=user.organization_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
     return item
@@ -75,38 +86,40 @@ async def get_item(item_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> In
     "",
     response_model=InventoryItemResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_roles([Role.ADMIN, Role.INVENTORY_MANAGER]))],
 )
 async def create_item(
     data: InventoryItemCreate,
+    user: User = Depends(require_roles([Role.ADMIN, Role.INVENTORY_MANAGER])),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> InventoryItem:
-    if await crud_product.get(db, data.product_id) is None:
+    prod = await crud_product.get(db, data.product_id)
+    if prod is None or (user.organization_id is not None and prod.organization_id is not None and prod.organization_id != user.organization_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Product not found")
-    if await crud_warehouse.get(db, data.warehouse_id) is None:
+    wh = await crud_warehouse.get(db, data.warehouse_id)
+    if wh is None or (user.organization_id is not None and wh.organization_id is not None and wh.organization_id != user.organization_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Warehouse not found")
     _check_quantities(data.quantity_on_hand, data.reserved_quantity)
     try:
         item = await crud.create(db, data)
     except ConflictError:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Product already stocked in this warehouse")
-    await invalidate_inventory_summary(redis)
+    await invalidate_inventory_summary(redis, organization_id=user.organization_id)
     return item
 
 
 @router.patch(
     "/{item_id}",
     response_model=InventoryItemResponse,
-    dependencies=[Depends(require_roles(ALL_ROLES))],
 )
 async def update_stock(
     item_id: uuid.UUID,
     data: InventoryItemUpdate,
+    user: User = Depends(require_roles(ALL_ROLES)),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> InventoryItem:
-    item = await crud.get(db, item_id, for_update=True)  # row lock: serialise concurrent count updates
+    item = await crud.get_with_org(db, item_id, organization_id=user.organization_id, for_update=True)  # row lock: serialise concurrent count updates
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
     on_hand = data.quantity_on_hand if data.quantity_on_hand is not None else item.quantity_on_hand
@@ -118,23 +131,23 @@ async def update_stock(
         item = await crud.update(db, item, data)
     except ConflictError:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Invalid stock quantities")
-    await invalidate_inventory_summary(redis)
+    await invalidate_inventory_summary(redis, organization_id=user.organization_id)
     return item
 
 
 @router.delete(
     "/{item_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_roles([Role.ADMIN]))],
 )
 async def delete_item(
     item_id: uuid.UUID,
+    user: User = Depends(require_roles([Role.ADMIN])),
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> Response:
-    item = await crud.get(db, item_id)
+    item = await crud.get_with_org(db, item_id, organization_id=user.organization_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
     await crud.delete(db, item)
-    await invalidate_inventory_summary(redis)
+    await invalidate_inventory_summary(redis, organization_id=user.organization_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,12 +1,16 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, Enum, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.user import User
+
+if TYPE_CHECKING:
+    from app.models.organization import Organization
 
 
 class RequestStatus(str, enum.Enum):
@@ -21,6 +25,9 @@ class AccessRequest(Base):
     __tablename__ = "access_requests"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True, default=None
+    )
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
     status: Mapped[RequestStatus] = mapped_column(
         Enum(RequestStatus, name="access_request_status"),
@@ -34,3 +41,4 @@ class AccessRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(foreign_keys=[user_id], lazy="joined")
+    organization: Mapped["Organization | None"] = relationship("Organization", back_populates="access_requests", foreign_keys=[organization_id])

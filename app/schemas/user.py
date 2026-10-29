@@ -49,24 +49,53 @@ class PreferencesUpdate(BaseModel):
 class UserCreate(BaseModel):
     email: EmailStr
     password: Password
-    role: Role = Role.WAREHOUSE_STAFF
+    role: Role | str = Role.WAREHOUSE_STAFF
+    full_name: str | None = Field(default=None, max_length=120)
+    job_title: str | None = Field(default=None, max_length=120)
+    department: str | None = Field(default=None, max_length=120)
+
+    _clean_fields = field_validator("full_name", "job_title", "department")(_blank_to_none)
+
+
+class AdminRegister(BaseModel):
+    email: EmailStr
+    password: Password
+    full_name: str | None = Field(default=None, max_length=120)
+    organization_name: str = Field(min_length=2, max_length=150)
+    organization_location: str | None = Field(default=None, max_length=255)
+
+    _clean = field_validator("full_name", "organization_location")(_blank_to_none)
+
+
+class EmployeeRegister(BaseModel):
+    email: EmailStr
+    password: Password
+    org_code: str = Field(min_length=3, max_length=20)
     full_name: str | None = Field(default=None, max_length=120)
 
-    _clean_name = field_validator("full_name")(_blank_to_none)
+    _clean = field_validator("full_name", "org_code")(_blank_to_none)
 
 
 class UserRegister(BaseModel):
     email: EmailStr
     password: Password
     full_name: str | None = Field(default=None, max_length=120)
+    org_code: str | None = Field(default=None, max_length=20)
+    organization_name: str | None = Field(default=None, max_length=150)
+    organization_location: str | None = Field(default=None, max_length=255)
 
     _clean_name = field_validator("full_name")(_blank_to_none)
 
 
 class UserUpdate(BaseModel):
-    role: Role | None = None
+    role: Role | str | None = None
     is_active: bool | None = None
     password: Password | None = None
+    full_name: str | None = Field(default=None, max_length=120)
+    job_title: str | None = Field(default=None, max_length=120)
+    department: str | None = Field(default=None, max_length=120)
+
+    _clean_fields = field_validator("full_name", "job_title", "department")(_blank_to_none)
 
 
 class ProfileUpdate(BaseModel):
@@ -126,12 +155,18 @@ class UserResponse(BaseModel):
 
     id: uuid.UUID
     email: EmailStr
-    role: Role
+    role: Role | str
     is_active: bool
     email_verified: bool = True
     full_name: str | None = None
     job_title: str | None = None
+    department: str | None = None
     phone: str | None = None
     avatar_url: str | None = None
     preferences: Preferences = Field(default_factory=Preferences)
+    organization_id: uuid.UUID | None = None
+    org_code: str | None = None
+    organization_name: str | None = None
+    organization_currency: str = "USD"
     created_at: datetime | None = None
+    permissions: list[str] = Field(default_factory=list)

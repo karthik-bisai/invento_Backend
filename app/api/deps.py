@@ -13,7 +13,7 @@ from app.models.user import Role, User
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
-__all__ = ["get_db", "get_redis", "get_current_user", "require_roles"]
+__all__ = ["get_db", "get_redis", "get_current_user", "require_roles", "require_permission"]
 
 
 def get_redis() -> Redis:
@@ -45,11 +45,27 @@ async def get_current_user(
 
 
 def require_roles(allowed: list[Role | str]) -> Callable[..., Awaitable[User]]:
-    allowed_roles = {Role(r) for r in allowed}
+    allowed_roles = {str(r.value if isinstance(r, Role) else r).upper() for r in allowed}
 
     async def checker(user: User = Depends(get_current_user)) -> User:
-        if user.role not in allowed_roles:
+        user_role_str = str(user.role.value if isinstance(user.role, Role) else user.role).upper()
+        if user_role_str not in allowed_roles:
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
         return user
 
     return checker
+
+
+def require_permission(permission: str) -> Callable[..., Awaitable[User]]:
+    async def checker(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> User:
+        user_role_str = str(user.role.value if isinstance(user.role, Role) else user.role).upper()
+        if user_role_str == "ADMIN":
+            return user
+        from app.crud.role import get_effective_permissions
+        perms = await get_effective_permissions(db, user)
+        if permission not in perms:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return user
+
+    return checker
+

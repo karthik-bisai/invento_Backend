@@ -20,7 +20,7 @@ class AccessRequestResponse(BaseModel):
 
 
 class ApproveRequest(BaseModel):
-    role: Role = Role.WAREHOUSE_STAFF
+    role: Role | str = Role.WAREHOUSE_STAFF
 
 
 class RejectRequest(BaseModel):
