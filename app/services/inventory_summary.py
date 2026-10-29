@@ -139,14 +139,14 @@ async def get_inventory_summary(
         if cached:
             return InventorySummary.model_validate_json(cached)
     except RedisError:
-        logger.warning("Redis read failed for %s", cache_key, exc_info=True)
+        logger.warning("Redis read failed for %s", cache_key)
 
     summary = await compute_inventory_summary(db, organization_id=organization_id)
 
     try:
         await redis.set(cache_key, summary.model_dump_json(), ex=SUMMARY_TTL_SECONDS)
     except RedisError:
-        logger.warning("Redis write failed for %s", cache_key, exc_info=True)
+        logger.warning("Redis write failed for %s", cache_key)
     return summary
 
 
@@ -157,5 +157,5 @@ async def invalidate_inventory_summary(redis: Redis, organization_id: uuid.UUID 
             await redis.delete(_cache_key(organization_id))
         await redis.delete(SUMMARY_CACHE_KEY)
     except RedisError:
-        logger.warning("Redis delete failed for summary; summary may be stale up to %ss", SUMMARY_TTL_SECONDS, exc_info=True)
+        logger.warning("Redis delete failed for summary; summary may be stale up to %ss", SUMMARY_TTL_SECONDS)
 
